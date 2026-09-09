@@ -418,6 +418,29 @@ func (s *Server) updateActivity() {
 	s.activityMu.Unlock()
 }
 
+// shouldIdleShutdown reports whether the daemon has been idle long enough to
+// shut down. Never reap the daemon while a sent notification is still
+// waiting for a click: it owns the only D-Bus listener that can resolve that
+// notification's ActionInvoked signal, and clicking a notification sent by
+// an already-exited daemon is a silent no-op (no focus, no dismiss). So a
+// pending focusCtx entry counts as activity, resetting the idle clock, and
+// the clock only starts once the last one is resolved.
+func (s *Server) shouldIdleShutdown() bool {
+	s.focusCtxMu.RLock()
+	pending := len(s.focusCtx)
+	s.focusCtxMu.RUnlock()
+	if pending > 0 {
+		s.updateActivity()
+		return false
+	}
+
+	s.activityMu.Lock()
+	idle := time.Since(s.lastActivity)
+	s.activityMu.Unlock()
+
+	return idle >= s.idleTimeout
+}
+
 // idleChecker monitors for idle timeout
 func (s *Server) idleChecker() {
 	defer s.wg.Done()
@@ -428,11 +451,7 @@ func (s *Server) idleChecker() {
 	for {
 		select {
 		case <-ticker.C:
-			s.activityMu.Lock()
-			idle := time.Since(s.lastActivity)
-			s.activityMu.Unlock()
-
-			if idle >= s.idleTimeout {
+			if s.shouldIdleShutdown() {
 				log.Printf("[INFO] Idle timeout reached (%v), shutting down", s.idleTimeout)
 				s.mu.Lock()
 				if !s.shutdown {
